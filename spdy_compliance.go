@@ -45,7 +45,7 @@ import (
 	"url"
 )
 
-// Various ANSI escape sequences 
+// Various ANSI escape sequences
 const (
 	RED    = "[0;31m"
 	GREEN  = "[0;32m"
@@ -142,7 +142,6 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	if len(t.args) > 0 {
 		match := false
 		for _, arg := range t.args {
-			// fmt.Printf("checking: %s\n", arg)
 			if description == arg {
 				match = true
 				break
