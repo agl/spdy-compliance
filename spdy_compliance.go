@@ -64,7 +64,7 @@ type TestConfig struct {
 	PostUrl       *url.URL  
 	PushUrl       *url.URL  // URL that will result in resources being pushed
 	DisabledTests []string
-	MaxStreams    int
+	MaxStreams    int       // TODO(rch): detect this from SETTINGS frame
 }
 
 // Loads the configuration data from a file.
@@ -142,6 +142,7 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	if len(t.args) > 0 {
 		match := false
 		for _, arg := range t.args {
+			// fmt.Printf("checking: %s\n", arg)
 			if description == arg {
 				match = true
 				break
@@ -422,7 +423,7 @@ func (t *SpdyTester) ExpectReply(id uint32) {
 			if data.StreamId != id {
 				panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, data.StreamId))
 			}
-			fmt.Printf("FLAGS: %d\n", data.Flags)
+			//fmt.Printf("FLAGS: %d\n", data.Flags)
 			if data.Flags == spdy.DataFlagFin {
 				break
 			}
@@ -531,7 +532,7 @@ func (t *SpdyTester) SendDataAndExpectPing(data []uint8) {
 // Tests that the server support NPN negotiation for
 // all the various protocols and versions.
 func CheckNextProtocolNegotiationSupport(t *TestRunner) {
-	protos := [...]string{"http/1.1", "spdy/2", "spdy/2.1", "spdy/3"}
+	protos := [...]string{"http/1.1", "spdy/2", "spdy/3"}
 	for _, proto := range protos {
 		t.RunTest(
 			func(t *SpdyTester) {
@@ -1048,12 +1049,7 @@ func main() {
 		fmt.Printf("usage: spdy_compliance <config> [<test> ...]\n")
 		os.Exit(1)
 	}
-	/*
-		out, _ := os.Stdout.Stat()
-		tty, _ := os.Stat("/dev/tty")
-		fmt.Printf("%s\n", tty)
-		fmt.Printf("%s\n", out)
-	*/
+	// TODO(rch): figure out how to detect a tty, and conditionally enable color
 	useColor := true
 	t := NewTestRunner(useColor, os.Args[1], os.Args[2:])
 
@@ -1066,8 +1062,9 @@ func main() {
 	CheckPingSupport(t)
 	CheckGoAwaySupport(t)
 	CheckHeadersSupport(t)
+	// TODO(rch): conditionally test spdy/3 functionality
 	//CheckWindowUpdateSupport(t)
-	CheckCredentialSupport(t)
+	//CheckCredentialSupport(t)
 	CheckDataSupport(t)
 
 	// HTTP layering
