@@ -27,6 +27,9 @@
 //   ]
 // }
 //
+// To install the go tools, follow the instructions here:
+//   http://golang.org/doc/install.html
+//
 // Compile and run with:
 // % 6g spdy_compliance.go && 6l spdy_compliance.6 && ./6.out <config.json>
 
