@@ -37,6 +37,7 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/tls"
 	"fmt"
 	"http"
@@ -64,10 +65,10 @@ const (
 type TestConfig struct {
 	Endpoint      string
 	GetUrl        *url.URL
-	PostUrl       *url.URL  
-	PushUrl       *url.URL  // URL that will result in resources being pushed
+	PostUrl       *url.URL
+	PushUrl       *url.URL // URL that will result in resources being pushed
 	DisabledTests []string
-	MaxStreams    int       // TODO(rch): detect this from SETTINGS frame
+	MaxStreams    int // TODO(rch): detect this from SETTINGS frame
 }
 
 // Loads the configuration data from a file.
@@ -97,9 +98,9 @@ func (t *TestConfig) ParseAsUrl(u interface{}) *url.URL {
 	if u == nil {
 		return nil
 	}
-		url, err := url.Parse(u.(string))
-		if err != nil {
-			panic(err)
+	url, err := url.Parse(u.(string))
+	if err != nil {
+		panic(err)
 	}
 	return url
 }
@@ -115,8 +116,7 @@ type TestRunner struct {
 	numDisabledTests int        // total number of disabled tests
 	failedTests      []string   // list of test descriptions that failed
 	useColor         bool       // if true, then ansi color will be used in the output
-	args             []string   // list of command line arguments used to restrict
-	// the actual set of tests to be run
+	args             []string   // list of command line arguments used to restrict the actual set of tests to be run
 	elapsedTime      int64      // Total number of nanoseconds spent executing tests
 }
 
@@ -165,7 +165,7 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	}
 
 	t.Log(GREEN, " RUN      ", description)
-  start := time.Nanoseconds()
+	start := time.Nanoseconds()
 	defer t.Finished(description, start)
 	tester := NewSpdyTester(&t.config)
 	defer tester.Close()
@@ -186,8 +186,8 @@ func (t *TestRunner) Finished(description string, start int64) {
 	t.elapsedTime += delta
 	t.numTests++
 	err := recover()
-	
-	text := fmt.Sprintf("%s (%d ms)", description, delta / 1000000)
+
+	text := fmt.Sprintf("%s (%d ms)", description, delta/1000000)
 	if err != nil {
 		if t.useColor {
 			fmt.Printf("%sERROR%s: %s\n", BOLD, NORMAL, err)
@@ -204,7 +204,7 @@ func (t *TestRunner) Finished(description string, start int64) {
 // Prints a textual summary of all the test run.
 func (t *TestRunner) Summarize() bool {
 	t.Log(GREEN, "==========",
-		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, t.elapsedTime / 1000000))
+		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, t.elapsedTime/1000000))
 
 	t.Log(GREEN, "  PASSED  ",
 		fmt.Sprintf("%d tests.", t.numTests-len(t.failedTests)))
@@ -338,7 +338,7 @@ func (t *SpdyTester) ExpectGoAway(lastGoodStreamId int) {
 	}
 	goAwayFrame, ok := frame.(*spdy.GoAwayFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected GOAWAY, received: %s", frame))
+		panic(fmt.Sprintf("Expected GOAWAY, received: %#v", frame))
 	}
 	if goAwayFrame.LastGoodStreamId != uint32(lastGoodStreamId) {
 		panic(fmt.Sprintf("Incorrect LastGoodStreamId: expected 0 got %d",
@@ -387,7 +387,7 @@ func (t *SpdyTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
 
 	rst, ok := frame.(*spdy.RstStreamFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an RST_STREAM frame, received: %s", frame))
+		panic(fmt.Sprintf("Expected an RST_STREAM frame, received: %#v", frame))
 	}
 	if rst.StreamId != id {
 		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, rst.StreamId))
@@ -408,7 +408,7 @@ func (t *SpdyTester) ExpectReply(id uint32) {
 
 	reply, ok := frame.(*spdy.SynReplyFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an SYN_REPLY frame, received: %s", frame))
+		panic(fmt.Sprintf("Expected an SYN_REPLY frame, received: %#v", frame))
 	}
 	if reply.StreamId != id {
 		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, reply.StreamId))
@@ -458,16 +458,16 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 			if dataReceived {
 				panic("Stream pushed after data recevied")
 			}
-			if syn.StreamId % 2 != 0 {
-					panic(fmt.Sprintf("Server push stream with odd stream id: %d", 
-						syn.StreamId))
+			if syn.StreamId%2 != 0 {
+				panic(fmt.Sprintf("Server push stream with odd stream id: %d",
+					syn.StreamId))
 			}
 			if syn.CFHeader.Flags != 2 {
-					panic(fmt.Sprintf("Server push stream was not unidirectional"))
+				panic(fmt.Sprintf("Server push stream was not unidirectional"))
 			}
-			for k,_ := range pushedIds {
+			for k, _ := range pushedIds {
 				if syn.StreamId < k {
-						panic(fmt.Sprintf("Decreasing stream id: %d", syn.StreamId))
+					panic(fmt.Sprintf("Decreasing stream id: %d", syn.StreamId))
 				}
 				if syn.StreamId == k {
 					panic(fmt.Sprintf("Duplicate stream id: %d", syn.StreamId))
@@ -494,7 +494,7 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 			if len(pushedIds) == 0 {
 				break
 			}
-		}			
+		}
 	}
 	fmt.Printf("%d\n", numPushed)
 	if numPushed == 0 {
@@ -751,6 +751,256 @@ func CheckSynStreamSupport(t *TestRunner) {
 		t.framer.WriteFrame(syn)
 		t.ExpectPushReply(1)
 	}, "Server push")
+}
+
+// buildNameValueBlock returns an encoded (but not compressed) Name/Value block
+// consisting of the given strings. The number of values is given explicitly so
+// that it can be incorrect.
+func buildNameValueBlock(numValues int, values ...string) []byte {
+	length := 4 /* num values */
+	for _, v := range values {
+		length += 4 + len(v)
+	}
+
+	ret := make([]byte, length)
+	x := ret
+
+	x[0] = byte(numValues >> 24)
+	x[1] = byte(numValues >> 16)
+	x[2] = byte(numValues >> 8)
+	x[3] = byte(numValues)
+	x = x[4:]
+
+	for _, v := range values {
+		x[0] = byte(len(v) >> 24)
+		x[1] = byte(len(v) >> 16)
+		x[2] = byte(len(v) >> 8)
+		x[3] = byte(len(v))
+		x = x[4:]
+
+		copy(x, []byte(v))
+		x = x[len(v):]
+	}
+
+	if len(x) > 0 {
+		panic("internal error")
+	}
+
+	return ret
+}
+
+// synStreamHeader is a SPDY SYN_STREAM with a zero length a no compressed
+// name/value block.
+var synStreamHeader = []byte{
+	0x80, 0x02, // version = 2
+	0x00, 0x01,
+	0x01,             // flags
+	0x00, 0x00, 0x00, // length (pending)
+	0x00, 0x00, 0x00, 0x01, // stream ID
+	0x00, 0x00, 0x00, 0x00, // assoc stream ID
+	0x00, // priority
+	0x00, // unused
+}
+
+// buildSynStreamWithNameValueData compresses the given name/value data and
+// returns a SYN_STREAM frame using it.
+func buildSynStreamWithNameValueData(nameValueData []byte) []byte {
+	compressBuf := new(bytes.Buffer)
+	compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+	compressor.Write(nameValueData)
+	compressor.Flush()
+
+	var bytes []byte
+	bytes = append(bytes, synStreamHeader...)
+	bytes = append(bytes, compressBuf.Bytes()...)
+	length := len(bytes) - 8
+	bytes[5] = byte(length >> 16)
+	bytes[6] = byte(length >> 8)
+	bytes[7] = byte(length)
+
+	return bytes
+}
+
+func CheckNameValueBlocks(t *TestRunner) {
+	t.RunTest(func(t *SpdyTester) {
+		var bytes []byte
+		bytes = append(bytes, synStreamHeader...)
+		// append invalid zlib data
+		bytes = append(bytes, []byte{0x42, 0x42, 0x42}...)
+		bytes[7] = byte(len(bytes) - 8)
+		// Shouldn't the last good stream ID here be zero?
+		t.SendDataAndExpectGoAway(bytes, 1)
+	}, "Send SYN_STREAM with bad zlib data")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		t.SendDataAndExpectValidReply(bytes)
+	}, "Send SYN_STREAM with valid NV block")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+			"Method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with uppercase header")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+			"", "bar",
+		))
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with empty name")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+			"foo", "",
+		))
+		t.SendDataAndExpectValidReply(bytes)
+	}, "Send SYN_STREAM with empty value")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		bytes = append(bytes, 0)
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with garbage after NV block")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+			"method", "GET",
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with duplicate header")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with too large NV count")
+
+	t.RunTest(func(t *SpdyTester) {
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(4,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		))
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with too small NV count")
+
+	t.RunTest(func(t *SpdyTester) {
+		block := buildNameValueBlock(0,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		)
+		// Alter the number of headers to be huge
+		block[0] = 0x7f
+		bytes := buildSynStreamWithNameValueData(block)
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with huge NV count")
+
+	t.RunTest(func(t *SpdyTester) {
+		block := buildNameValueBlock(0,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		)
+		// Alter the number of headers to be possibly negative. This
+		// might get by a sanity check in a buggy server.
+		block[0] = 0x81
+		bytes := buildSynStreamWithNameValueData(block)
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with possibly negative NV count")
+
+	t.RunTest(func(t *SpdyTester) {
+		block := buildNameValueBlock(5,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		)
+		// Alter the first key length to be huge
+		block[4] = 0x7f
+		bytes := buildSynStreamWithNameValueData(block)
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with huge NV key length")
+
+	t.RunTest(func(t *SpdyTester) {
+		block := buildNameValueBlock(5,
+			"method", "GET",
+			"version", "HTTP/1.1",
+			"url", t.config.GetUrl.String(),
+			"host", t.config.GetUrl.Host,
+			"scheme", t.config.GetUrl.Scheme,
+		)
+		// Alter the first key length to be possibly negative
+		block[4] = 0x81
+		bytes := buildSynStreamWithNameValueData(block)
+		t.SendDataAndExpectGoAway(bytes, 0)
+	}, "Send SYN_STREAM with possibly negative NV key length")
+
+	t.RunTest(func(t *SpdyTester) {
+		compressBuf := new(bytes.Buffer)
+		compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+		//compressor, _ := zlib.NewWriterDict(compressBuf, []byte(spdy.HeaderDictionary))
+		// 1 MB of NULs
+		nuls := make([]byte, 1024)
+		for i := 0; i < 1024; i++ {
+			compressor.Write(nuls)
+		}
+		compressor.Flush()
+
+		var bytes []byte
+		bytes = append(bytes, synStreamHeader...)
+		bytes = append(bytes, compressBuf.Bytes()...)
+		length := len(bytes) - 8
+		bytes[5] = byte(length >> 16)
+		bytes[6] = byte(length >> 8)
+		bytes[7] = byte(length)
+		t.SendDataAndExpectGoAway(bytes, 1)
+	}, "Send SYN_STREAM with huge NV block")
 }
 
 func CheckConcurrentStreamSupport(t *SpdyTester) {
@@ -1041,8 +1291,6 @@ func CheckDataSupport(t *TestRunner) {
 	// context for that stream. (Thus, if both endpoints of a stream are
 	// compressing data on the stream, there will be two zlib contexts, one
 	// for sending and one for receiving).
-
-
 }
 
 // ----------------------------------------------------------------------
@@ -1059,6 +1307,7 @@ func main() {
 	CheckNextProtocolNegotiationSupport(t)
 	CheckInvalidControlFrameDetection(t)
 	CheckSynStreamSupport(t)
+	CheckNameValueBlocks(t)
 	CheckSynReplySupport(t)
 	CheckRstStreamSupport(t)
 	CheckSettingsSupport(t)
