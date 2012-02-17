@@ -61,10 +61,10 @@ const (
 type TestConfig struct {
 	Endpoint      string
 	GetUrl        *url.URL
-	PostUrl       *url.URL  
-	PushUrl       *url.URL  // URL that will result in resources being pushed
+	PostUrl       *url.URL
+	PushUrl       *url.URL // URL that will result in resources being pushed
 	DisabledTests []string
-	MaxStreams    int       // TODO(rch): detect this from SETTINGS frame
+	MaxStreams    int // TODO(rch): detect this from SETTINGS frame
 }
 
 // Loads the configuration data from a file.
@@ -94,9 +94,9 @@ func (t *TestConfig) ParseAsUrl(u interface{}) *url.URL {
 	if u == nil {
 		return nil
 	}
-		url, err := url.Parse(u.(string))
-		if err != nil {
-			panic(err)
+	url, err := url.Parse(u.(string))
+	if err != nil {
+		panic(err)
 	}
 	return url
 }
@@ -112,8 +112,7 @@ type TestRunner struct {
 	numDisabledTests int        // total number of disabled tests
 	failedTests      []string   // list of test descriptions that failed
 	useColor         bool       // if true, then ansi color will be used in the output
-	args             []string   // list of command line arguments used to restrict
-	// the actual set of tests to be run
+	args             []string   // list of command line arguments used to restrict the actual set of tests to be run
 	elapsedTime      int64      // Total number of nanoseconds spent executing tests
 }
 
@@ -162,7 +161,7 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	}
 
 	t.Log(GREEN, " RUN      ", description)
-  start := time.Nanoseconds()
+	start := time.Nanoseconds()
 	defer t.Finished(description, start)
 	tester := NewSpdyTester(&t.config)
 	defer tester.Close()
@@ -183,8 +182,8 @@ func (t *TestRunner) Finished(description string, start int64) {
 	t.elapsedTime += delta
 	t.numTests++
 	err := recover()
-	
-	text := fmt.Sprintf("%s (%d ms)", description, delta / 1000000)
+
+	text := fmt.Sprintf("%s (%d ms)", description, delta/1000000)
 	if err != nil {
 		if t.useColor {
 			fmt.Printf("%sERROR%s: %s\n", BOLD, NORMAL, err)
@@ -201,7 +200,7 @@ func (t *TestRunner) Finished(description string, start int64) {
 // Prints a textual summary of all the test run.
 func (t *TestRunner) Summarize() bool {
 	t.Log(GREEN, "==========",
-		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, t.elapsedTime / 1000000))
+		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, t.elapsedTime/1000000))
 
 	t.Log(GREEN, "  PASSED  ",
 		fmt.Sprintf("%d tests.", t.numTests-len(t.failedTests)))
@@ -455,16 +454,16 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 			if dataReceived {
 				panic("Stream pushed after data recevied")
 			}
-			if syn.StreamId % 2 != 0 {
-					panic(fmt.Sprintf("Server push stream with odd stream id: %d", 
-						syn.StreamId))
+			if syn.StreamId%2 != 0 {
+				panic(fmt.Sprintf("Server push stream with odd stream id: %d",
+					syn.StreamId))
 			}
 			if syn.CFHeader.Flags != 2 {
-					panic(fmt.Sprintf("Server push stream was not unidirectional"))
+				panic(fmt.Sprintf("Server push stream was not unidirectional"))
 			}
-			for k,_ := range pushedIds {
+			for k, _ := range pushedIds {
 				if syn.StreamId < k {
-						panic(fmt.Sprintf("Decreasing stream id: %d", syn.StreamId))
+					panic(fmt.Sprintf("Decreasing stream id: %d", syn.StreamId))
 				}
 				if syn.StreamId == k {
 					panic(fmt.Sprintf("Duplicate stream id: %d", syn.StreamId))
@@ -491,7 +490,7 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 			if len(pushedIds) == 0 {
 				break
 			}
-		}			
+		}
 	}
 	fmt.Printf("%d\n", numPushed)
 	if numPushed == 0 {
@@ -1038,8 +1037,6 @@ func CheckDataSupport(t *TestRunner) {
 	// context for that stream. (Thus, if both endpoints of a stream are
 	// compressing data on the stream, there will be two zlib contexts, one
 	// for sending and one for receiving).
-
-
 }
 
 // ----------------------------------------------------------------------
