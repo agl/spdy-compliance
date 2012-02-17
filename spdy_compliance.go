@@ -335,7 +335,7 @@ func (t *SpdyTester) ExpectGoAway(lastGoodStreamId int) {
 	}
 	goAwayFrame, ok := frame.(*spdy.GoAwayFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected GOAWAY, received: %s", frame))
+		panic(fmt.Sprintf("Expected GOAWAY, received: %#v", frame))
 	}
 	if goAwayFrame.LastGoodStreamId != uint32(lastGoodStreamId) {
 		panic(fmt.Sprintf("Incorrect LastGoodStreamId: expected 0 got %d",
@@ -384,7 +384,7 @@ func (t *SpdyTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
 
 	rst, ok := frame.(*spdy.RstStreamFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an RST_STREAM frame, received: %s", frame))
+		panic(fmt.Sprintf("Expected an RST_STREAM frame, received: %#v", frame))
 	}
 	if rst.StreamId != id {
 		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, rst.StreamId))
@@ -405,7 +405,7 @@ func (t *SpdyTester) ExpectReply(id uint32) {
 
 	reply, ok := frame.(*spdy.SynReplyFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an SYN_REPLY frame, received: %s", frame))
+		panic(fmt.Sprintf("Expected an SYN_REPLY frame, received: %#v", frame))
 	}
 	if reply.StreamId != id {
 		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, reply.StreamId))
