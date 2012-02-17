@@ -803,7 +803,7 @@ var synStreamHeader = []byte{
 // returns a SYN_STREAM frame using it.
 func buildSynStreamWithNameValueData(nameValueData []byte) []byte {
 	compressBuf := new(bytes.Buffer)
-	compressor, _ := zlib.NewWriterLevelDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+	compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
 	compressor.Write(nameValueData)
 	compressor.Flush()
 
@@ -980,7 +980,8 @@ func CheckNameValueBlocks(t *TestRunner) {
 
 	t.RunTest(func(t *SpdyTester) {
 		compressBuf := new(bytes.Buffer)
-		compressor, _ := zlib.NewWriterLevelDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+		compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+		//compressor, _ := zlib.NewWriterDict(compressBuf, []byte(spdy.HeaderDictionary))
 		// 1 MB of NULs
 		nuls := make([]byte, 1024)
 		for i := 0; i < 1024; i++ {
