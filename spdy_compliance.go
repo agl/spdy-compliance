@@ -168,7 +168,7 @@ func (t *TestRunner) Log(color, status, description string) {
 
 // RunTest runs the specified test, and records the results. The test will be
 // marked as failed if it panics.
-func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
+func (t *TestRunner) RunTest(test func(*SPDYTester), description string) {
 	// If any arguments were given, then this test must have been listed.
 	if len(t.args) > 0 {
 		match := false
@@ -192,7 +192,7 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	t.Log(t.color.Green, " RUN      ", description)
 	start := time.Now()
 	defer t.Finished(description, start)
-	tester := NewSpdyTester(t.config)
+	tester := NewSPDYTester(t.config)
 	defer tester.Close()
 	test(tester)
 }
@@ -244,10 +244,8 @@ func (t *TestRunner) Summarize() bool {
 
 // Utility function for creating a sequence of bytes that represents 
 // a (probably invalid) SPDY control frame.
-func CreateControlFrameBytes(
-	version uint8, frameType uint16,
-	flags uint8, length uint8) []byte {
-	bytes := make([]byte, 8+length, 8+length)
+func CreateControlFrameBytes(version uint8, frameType uint16, flags uint8, length uint8) []byte {
+	bytes := make([]byte, 8+length)
 	bytes[0] = 1 << 7
 	bytes[1] = version
 	bytes[2] = uint8(frameType >> 8)
@@ -261,25 +259,26 @@ func CreateControlFrameBytes(
 
 // ----------------------------------------------------------------------
 
-type SpdyTester struct {
+type SPDYTester struct {
 	conn   *tls.Conn
 	framer *spdy.Framer
 	config *TestConfig
 }
 
-func NewSpdyTester(config *TestConfig) *SpdyTester {
-	var sessionTester = new(SpdyTester)
-	sessionTester.config = config
-	sessionTester.init([]string{"spdy/2"})
-	return sessionTester
+func NewSPDYTester(config *TestConfig) *SPDYTester {
+	tester := &SPDYTester{
+		config: config,
+	}
+	tester.Dial([]string{"spdy/2"})
+	return tester
 }
 
-func (t *SpdyTester) init(nextProtos []string) {
-	var tlsConfig = new(tls.Config)
-	tlsConfig.NextProtos = nextProtos
-	conn, err := tls.Dial("tcp", t.config.Endpoint, tlsConfig)
+// Dial creates a TLS connection to the configured end-point and negotiates
+// with the given Next Protocol Negotiation strings.
+func (t *SPDYTester) Dial(nextProtos []string) {
+	conn, err := tls.Dial("tcp", t.config.Endpoint, &tls.Config{NextProtos: nextProtos})
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("failed to make TLS connection to %s: %s", t.config.Endpoint, err))
 	}
 	// Timeout reads after 1 second.  This causes an ERR_IO_PENDING error
 	// to be returned when attempting to read a frame, and allows us
@@ -287,97 +286,93 @@ func (t *SpdyTester) init(nextProtos []string) {
 	// to one of our requests
 	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	t.conn = conn
-	t.framer, err = spdy.NewFramer(conn, conn)
-	if err != nil {
+	if t.framer, err = spdy.NewFramer(conn, conn); err != nil {
 		panic(err)
 	}
 }
 
-func (t *SpdyTester) Close() {
+func (t *SPDYTester) Close() {
 	t.conn.Close()
 }
 
 // Returns the protocol negotiated during the handshake, or the empty string
 // if no protocol was agreed upon.
-func (t *SpdyTester) NegotiatedProtocol() string {
+func (t *SPDYTester) NegotiatedProtocol() string {
 	if !t.conn.ConnectionState().NegotiatedProtocolIsMutual {
 		return ""
 	}
 	return t.conn.ConnectionState().NegotiatedProtocol
 }
 
-func (t *SpdyTester) CreateSynStreamFrameBytes(streamId int) []byte {
-	frame := new(spdy.SynStreamFrame)
-	frame.StreamId = uint32(streamId)
+func (t *SPDYTester) CreateSynStreamFrameBytes(streamId int) []byte {
+	frame := &spdy.SynStreamFrame{
+		StreamId: uint32(streamId),
+		Headers: http.Header{
+			"method":  []string{"GET"},
+			"version": []string{"HTTP/1.1"},
+			"url":     []string{t.config.GetURL.String()},
+			"host":    []string{t.config.GetURL.Host},
+			"scheme":  []string{t.config.GetURL.Scheme},
+		},
+	}
 	frame.CFHeader.Flags = spdy.ControlFlagFin
-	frame.Headers = http.Header{
-		"method":  []string{"GET"},
-		"version": []string{"HTTP/1.1"},
-		"url":     []string{t.config.GetURL.String()},
-		"host":    []string{t.config.GetURL.Host},
-		"scheme":  []string{t.config.GetURL.Scheme}}
 
-	buf := new(bytes.Buffer)
-	framer, err := spdy.NewFramer(buf, buf)
+	var buf bytes.Buffer
+	framer, err := spdy.NewFramer(&buf, &buf)
 	if err != nil {
-		fmt.Printf("ERROR: %s", err)
+		panic(err)
 	}
 	framer.WriteFrame(frame)
 
-	bytes := buf.Bytes()
-	return bytes
+	return buf.Bytes()
 }
 
-// Returns the next frame read from the framer that is not a SETTINGS frame.
-func (t *SpdyTester) ReadNextNonSettingsFrame() (spdy.Frame, error) {
+// ReadNextNonSettingsFrame returns the next frame read from the framer that is
+// not a SETTINGS frame.
+func (t *SPDYTester) ReadNextNonSettingsFrame() (spdy.Frame, error) {
 	for true {
-		//		fmt.Printf("Reading frame...\n")
 		frame, err := t.framer.ReadFrame()
-		//		fmt.Printf("Done.\n")
 		if err != nil {
 			return nil, err
 		}
-		//fmt.Printf("ReadFrame! %s\n", frame)
-		_, ok := frame.(*spdy.SettingsFrame)
-		if !ok {
+		if _, ok := frame.(*spdy.SettingsFrame); !ok {
 			return frame, nil
 		}
-		//fmt.Printf("SETTINGS: %s\n", frame)
 	}
 	panic("unreachable")
 }
 
-// Panics unless the non-settings frame is not a GOAWAY frame
-func (t *SpdyTester) ExpectGoAway(lastGoodStreamId int) {
+// ExpectGoAway reads a GOAWAY frame (with the given lastGoodStreamId) after
+// zero or more SETTINGS frames, or panics.
+func (t *SPDYTester) ExpectGoAway(lastGoodStreamId int) {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if err != nil {
 		panic(err)
 	}
 	goAwayFrame, ok := frame.(*spdy.GoAwayFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected GOAWAY, received: %#v", frame))
+		panic(fmt.Sprintf("Expected GOAWAY, got: %#v", frame))
 	}
 	if goAwayFrame.LastGoodStreamId != uint32(lastGoodStreamId) {
-		panic(fmt.Sprintf("Incorrect LastGoodStreamId: expected 0 got %d",
-			goAwayFrame.LastGoodStreamId))
+		panic(fmt.Sprintf("Incorrect LastGoodStreamId: expected 0, got %d", goAwayFrame.LastGoodStreamId))
 	}
 
 	t.ExpectEOF()
 }
 
-// Panics unless the next read from the session returns EOF.
-func (t *SpdyTester) ExpectEOF() {
+// ExpectEOF panics unless the next read from the session returns EOF.
+func (t *SPDYTester) ExpectEOF() {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if frame != nil {
-		panic(fmt.Sprintf("Unexpected frame after %s", frame))
+		panic(fmt.Sprintf("Expected EOF, got: %#v", frame))
 	}
 	if err != io.EOF {
-		panic(fmt.Sprintf("Unexpected error: %s", err))
+		panic(fmt.Sprintf("Expected EOF, got: %s", err))
 	}
 }
 
-// Panics if the next non-settings frame is not a PING frame.
-func (t *SpdyTester) ExpectPing(id uint32) {
+// ExpectPing panics if the next non-settings frame is not a PING frame.
+func (t *SPDYTester) ExpectPing(id uint32) {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error: %s", err))
@@ -385,18 +380,16 @@ func (t *SpdyTester) ExpectPing(id uint32) {
 
 	pingFrame, ok := frame.(*spdy.PingFrame)
 	if !ok {
-		panic(fmt.Sprintf("Not a ping frame.  Parsed incorrect frame type: %s",
-			frame))
+		panic(fmt.Sprintf("Expected PING, got: %#v", frame))
 	}
 	if pingFrame.Id != id {
-		panic(fmt.Sprintf("Incorrect id: expected %d got %d",
-			id, pingFrame.Id))
+		panic(fmt.Sprintf("Incorrect PING id: expected %d, got %d", id, pingFrame.Id))
 	}
 }
 
-// Panics if the next non-settings frame is not a RST_STREAM frame
-// with StreamID set to id.
-func (t *SpdyTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
+// ExpectRstStream panics if the next non-settings frame is not a RST_STREAM
+// frame with StreamID set to id.
+func (t *SPDYTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error: %s", err))
@@ -404,20 +397,20 @@ func (t *SpdyTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
 
 	rst, ok := frame.(*spdy.RstStreamFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an RST_STREAM frame, received: %#v", frame))
+		panic(fmt.Sprintf("Expected a RST_STREAM frame, got: %#v", frame))
 	}
 	if rst.StreamId != id {
-		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, rst.StreamId))
+		panic(fmt.Sprintf("Incorrect RST_STREAM id: expected %d, got %d", id, rst.StreamId))
 	}
 	if rst.Status != status {
-		panic(fmt.Sprintf("Incorrect status: expected %s got %s",
-			status, rst.Status))
+		panic(fmt.Sprintf("Incorrect RST_STREAM status: expected %s, got %s", status, rst.Status))
 	}
 }
 
-// Check that a SYN_REPLY frame is received as the first non-settings frame
-// followed by optional data frames until receipt of a frame with FIN set.
-func (t *SpdyTester) ExpectReply(id uint32) {
+// ExpectReply checks that a SYN_REPLY frame is received as the first
+// non-settings frame followed by optional data frames until receipt of a frame
+// with FIN set.
+func (t *SPDYTester) ExpectReply(id uint32) {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error: %s", err))
@@ -425,25 +418,24 @@ func (t *SpdyTester) ExpectReply(id uint32) {
 
 	reply, ok := frame.(*spdy.SynReplyFrame)
 	if !ok {
-		panic(fmt.Sprintf("Expected an SYN_REPLY frame, received: %#v", frame))
+		panic(fmt.Sprintf("Expected a SYN_REPLY frame, got: %#v", frame))
 	}
 	if reply.StreamId != id {
-		panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, reply.StreamId))
+		panic(fmt.Sprintf("Incorrect SYN_REPLY id: expected %d, got %d", id, reply.StreamId))
 	}
 	if reply.CFHeader.Flags != spdy.ControlFlagFin {
-		for true {
+		for {
 			frame, err := t.ReadNextNonSettingsFrame()
 			if err != nil {
 				panic(fmt.Sprintf("Unexpected error: %s", err))
 			}
 			data, ok := frame.(*spdy.DataFrame)
 			if !ok {
-				panic(fmt.Sprintf("Expected a DATA frame, received: %s", frame))
+				panic(fmt.Sprintf("Expected a DATA frame, got: %s", frame))
 			}
 			if data.StreamId != id {
-				panic(fmt.Sprintf("Incorrect id: expected %d got %d", id, data.StreamId))
+				panic(fmt.Sprintf("Incorrect DATA id: expected %d, got %d", id, data.StreamId))
 			}
-			//fmt.Printf("FLAGS: %d\n", data.Flags)
 			if data.Flags == spdy.DataFlagFin {
 				break
 			}
@@ -451,69 +443,56 @@ func (t *SpdyTester) ExpectReply(id uint32) {
 	}
 }
 
-func (t *SpdyTester) ExpectPushReply(streamId int) {
-	dataReceived := false
+func (t *SPDYTester) ExpectPushReply(streamId int) {
+	var dataReceived bool
+	var numPushed int
 	pushedIds := make(map[uint32]bool)
-	numPushed := 0
-	for true {
+
+	for {
 		frame, err := t.ReadNextNonSettingsFrame()
 		if err != nil {
 			panic(err)
 		}
-		reply, ok := frame.(*spdy.SynReplyFrame)
-		if ok {
-			//fmt.Printf("SYN_REPLY[%d]: %s\n", reply.StreamId, frame)
-			if reply.StreamId != uint32(streamId) {
-				panic(fmt.Sprintf("Expected repl for stream %d, received %d",
-					streamId, reply.StreamId))
+		switch frame := frame.(type) {
+		case *spdy.SynReplyFrame:
+			if frame.StreamId != uint32(streamId) {
+				panic(fmt.Sprintf("Expected repl for stream %d, got %d", streamId, frame.StreamId))
 			}
-			continue
-		}
-		syn, ok_syn := frame.(*spdy.SynStreamFrame)
-		if ok_syn {
-			//fmt.Printf("SYN_STREAM[%d]: %s\n", syn.StreamId, frame)
+		case *spdy.SynStreamFrame:
 			if dataReceived {
 				panic("Stream pushed after data recevied")
 			}
-			if syn.StreamId%2 != 0 {
-				panic(fmt.Sprintf("Server push stream with odd stream id: %d",
-					syn.StreamId))
+			if frame.StreamId%2 != 0 {
+				panic(fmt.Sprintf("Server push stream with odd stream id: %d", frame.StreamId))
 			}
-			if syn.CFHeader.Flags != 2 {
+			if frame.CFHeader.Flags != 2 {
 				panic(fmt.Sprintf("Server push stream was not unidirectional"))
 			}
 			for k, _ := range pushedIds {
-				if syn.StreamId < k {
-					panic(fmt.Sprintf("Decreasing stream id: %d", syn.StreamId))
+				if frame.StreamId < k {
+					panic(fmt.Sprintf("Decreasing stream id: %d", frame.StreamId))
 				}
-				if syn.StreamId == k {
-					panic(fmt.Sprintf("Duplicate stream id: %d", syn.StreamId))
+				if frame.StreamId == k {
+					panic(fmt.Sprintf("Duplicate stream id: %d", frame.StreamId))
 				}
 			}
 			// TODO(rch): Check for decreasing
 			// TODO(rch): Check for even and > 0
-			pushedIds[syn.StreamId] = true
+			pushedIds[frame.StreamId] = true
 			numPushed++
-			continue
-		}
-		data, ok_syn := frame.(*spdy.DataFrame)
-		if ok_syn {
-			//fmt.Printf("FLAGS: %d\n", data.Flags)
-			//fmt.Printf("DATA[%d]: %d\n", data.StreamId, len(data.Data))
-			if data.StreamId == 1 {
+		case *spdy.DataFrame:
+			if frame.StreamId == 1 {
 				dataReceived = true
 			} else {
-				if data.Flags == spdy.DataFlagFin {
-					delete(pushedIds, data.StreamId) //remove from map
+				if frame.Flags == spdy.DataFlagFin {
+					delete(pushedIds, frame.StreamId)
 				}
 			}
-			//fmt.Printf("map: %s %d\n", pushedIds, len(pushedIds))
 			if len(pushedIds) == 0 {
 				break
 			}
 		}
 	}
-	fmt.Printf("%d\n", numPushed)
 	if numPushed == 0 {
 		panic("No streams pushed")
 	}
@@ -521,30 +500,30 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 
 // ----------------------------------------------------------------------
 
-// Check that a GOAWAY frame is received as the first non-settings frame
-// after sending |data|.
-func (t *SpdyTester) SendDataAndExpectGoAway(data []uint8, lastGoodStreamId int) {
+// SendDataAndExpectGoAway check that a GOAWAY frame is received as the first
+// non-settings frame after sending |data|.
+func (t *SPDYTester) SendDataAndExpectGoAway(data []uint8, lastGoodStreamId int) {
 	t.conn.Write(data)
 	t.ExpectGoAway(lastGoodStreamId)
 }
 
-// Check that a RST_STREAM frame is received as the first non-settings frame
-// after sending |data|.
-func (t *SpdyTester) SendDataAndExpectRstStream(data []uint8, streamId int, status spdy.StatusCode) {
+// SendDataAndExpectRstStream checks that a RST_STREAM frame is received as the
+// first non-settings frame after sending |data|.
+func (t *SPDYTester) SendDataAndExpectRstStream(data []uint8, streamId int, status spdy.StatusCode) {
 	t.conn.Write(data)
 	t.ExpectRstStream(uint32(streamId), status)
 }
 
-// Check that a SYN_REPLY frame is received as the first non-settings frame
-// after sending |data|.
-func (t *SpdyTester) SendDataAndExpectValidReply(data []uint8) {
+// SendDataAndExpectValidReply checks that a SYN_REPLY frame is received as the
+// first non-settings frame after sending |data|.
+func (t *SPDYTester) SendDataAndExpectValidReply(data []uint8) {
 	t.conn.Write(data)
 	t.ExpectReply(1)
 }
 
-// Check that a PING frame is received as the first non-settings frame
-// after sending |data|.
-func (t *SpdyTester) SendDataAndExpectPing(data []uint8) {
+// SendDataAndExpectPing checks that a PING frame is received as the first
+// non-settings frame after sending |data|.
+func (t *SPDYTester) SendDataAndExpectPing(data []uint8) {
 	t.conn.Write(data)
 	t.ExpectPing(uint32(data[11]))
 }
@@ -555,9 +534,9 @@ func CheckNextProtocolNegotiationSupport(t *TestRunner) {
 	protos := [...]string{"http/1.1", "spdy/2", "spdy/3"}
 	for _, proto := range protos {
 		t.RunTest(
-			func(t *SpdyTester) {
+			func(t *SPDYTester) {
 				t.Close()
-				t.init([]string{proto})
+				t.Dial([]string{proto})
 				if t.NegotiatedProtocol() != proto {
 					panic("Unable to NPN negotiate: " + proto)
 				}
@@ -570,7 +549,7 @@ func CheckNextProtocolNegotiationSupport(t *TestRunner) {
 // the server sends a GOAWAY.
 func CheckInvalidControlFrameDetection(t *TestRunner) {
 	t.RunTest(
-		func(t *SpdyTester) {
+		func(t *SPDYTester) {
 			t.SendDataAndExpectGoAway([]uint8{
 				0xff, 0xff, 0xff, 0xff,
 				0xff, 0xff, 0xff, 0xff,
@@ -589,7 +568,7 @@ func CheckInvalidControlFrameDetection(t *TestRunner) {
 	// For any other type of control frame, the frame must be ignored.
 	// 
 	// Draft 3 is silent on the subject.
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(3, uint16(spdy.TypeNoop), 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
@@ -599,7 +578,7 @@ func CheckInvalidControlFrameDetection(t *TestRunner) {
 	// TODO(rch): actually, according to the spec:
 	// If an endpoint receives a control frame for a type it does not recognize,
 	// it MUST ignore the frame.
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeWindowUpdate)+6, 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
@@ -609,7 +588,7 @@ func CheckInvalidControlFrameDetection(t *TestRunner) {
 }
 
 func CheckSynStreamSupport(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		// Bogus flags
 		bytes := t.CreateSynStreamFrameBytes(1)
 		bytes[4] = 0xFF
@@ -619,35 +598,35 @@ func CheckSynStreamSupport(t *TestRunner) {
 	},
 		"GOAWAY after invalid SYN_STREAM flags")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := t.CreateSynStreamFrameBytes(1)
 		bytes[7] = 0x0 // no length
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
 		"GOAWAY after invalid SYN_STREAM length")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := t.CreateSynStreamFrameBytes(2)
 		//	DumpBytes(bytes)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
 		"GOAWAY after invalid SYN_STREAM StreamID (2)")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := t.CreateSynStreamFrameBytes(0)
 		//	DumpBytes(bytes)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
 		"GOAWAY after invalid SYN_STREAM StreamID (0)")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := t.CreateSynStreamFrameBytes(1)
 		//	DumpBytes(bytes)
 		t.SendDataAndExpectValidReply(bytes)
 	},
 		"Valid response to SYN_STREAM")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		// try sending same syn stream again
 		bytes := t.CreateSynStreamFrameBytes(1)
 		bytes = append(bytes, bytes...)
@@ -655,7 +634,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 	},
 		"GOAWAY after duplicate SYN_STREAM StreamID")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		// try sending decreasing stream id
 		bytes := t.CreateSynStreamFrameBytes(3)
 		bytes2 := t.CreateSynStreamFrameBytes(2)
@@ -664,13 +643,13 @@ func CheckSynStreamSupport(t *TestRunner) {
 	},
 		"GOAWAY after decreasing SYN_STREAM StreamID")
 
-	t.RunTest(func(t *SpdyTester) { CheckConcurrentStreamSupport(t) },
+	t.RunTest(func(t *SPDYTester) { CheckConcurrentStreamSupport(t) },
 		"Concurrent streams")
 
 	// Send a complete request with connection: close,
 	// and read complete reply, then verify that the connection stays open
 	// and we can send an additional request
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		frame := new(spdy.SynStreamFrame)
 		frame.CFHeader.Flags = spdy.ControlFlagFin
 		frame.Headers = http.Header{
@@ -694,7 +673,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 	// Send a complete request with connection: close,
 	// and read complete reply, then verify that the connection stays open
 	// and we can send an additional request
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		syn := new(spdy.SynStreamFrame)
 		syn.StreamId = 1
 		syn.Headers = http.Header{
@@ -721,7 +700,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		"DATA after RST")
 
 	// Send a complete POST request with an invalid content-length
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		syn := new(spdy.SynStreamFrame)
 		syn.StreamId = 1
 		syn.Headers = http.Header{
@@ -751,7 +730,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 	},
 		"Incorrect content-length")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		if t.config.PushURL == nil {
 			panic("No PushURL specified in config")
 		}
@@ -839,7 +818,7 @@ func buildSynStreamWithNameValueData(nameValueData []byte) []byte {
 }
 
 func CheckNameValueBlocks(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		var bytes []byte
 		bytes = append(bytes, synStreamHeader...)
 		// append invalid zlib data
@@ -849,7 +828,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 1)
 	}, "Send SYN_STREAM with bad zlib data")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -860,7 +839,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectValidReply(bytes)
 	}, "Send SYN_STREAM with valid NV block")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"Method", "GET",
 			"version", "HTTP/1.1",
@@ -871,7 +850,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with uppercase header")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -883,7 +862,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with empty name")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -895,7 +874,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectValidReply(bytes)
 	}, "Send SYN_STREAM with empty value")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -907,7 +886,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with garbage after NV block")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"method", "GET",
@@ -919,7 +898,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with duplicate header")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -930,7 +909,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with too large NV count")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(4,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -941,7 +920,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with too small NV count")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		block := buildNameValueBlock(0,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -955,7 +934,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with huge NV count")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		block := buildNameValueBlock(0,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -970,7 +949,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with possibly negative NV count")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		block := buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -984,7 +963,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with huge NV key length")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		block := buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -998,7 +977,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with possibly negative NV key length")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		compressBuf := new(bytes.Buffer)
 		compressor, _ := zlib.NewWriterLevelDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
 		// 1 MB of NULs
@@ -1019,7 +998,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with huge NV block")
 }
 
-func CheckConcurrentStreamSupport(t *SpdyTester) {
+func CheckConcurrentStreamSupport(t *SPDYTester) {
 	// Open up lots of streams and see what happens! :>
 	buf := new(bytes.Buffer)
 	framer, err := spdy.NewFramer(buf, buf)
@@ -1071,7 +1050,7 @@ func CheckConcurrentStreamSupport(t *SpdyTester) {
 }
 
 func CheckSynReplySupport(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(2, uint16(spdy.TypeSynReply), 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
@@ -1087,7 +1066,7 @@ func CheckRstStreamSupport(t *TestRunner) {
 		if i == validLength {
 			continue
 		}
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypeRstStream), 0, uint8(i))
 			t.SendDataAndExpectGoAway(bytes, 0)
@@ -1096,7 +1075,7 @@ func CheckRstStreamSupport(t *TestRunner) {
 	}
 
 	for i := 0; i < 16; i++ {
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypeRstStream), 0, 8)
 			bytes[15] = uint8(i)
@@ -1105,7 +1084,7 @@ func CheckRstStreamSupport(t *TestRunner) {
 			fmt.Sprintf("GOAWAY after invalid RST_STREAM flags (%d)", i))
 	}
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeRstStream), 0, 8)
 		bytes[11] = 3 // stream id that has not been opened
@@ -1121,7 +1100,7 @@ func CheckPingSupport(t *TestRunner) {
 		if i == validLength {
 			continue
 		}
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypePing), 0, uint8(i))
 			t.SendDataAndExpectGoAway(bytes, 0)
@@ -1131,7 +1110,7 @@ func CheckPingSupport(t *TestRunner) {
 
 	// Try various invalid (even) ids
 	for i := uint8(0); i < 8; i += 2 {
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypePing), 0, 4)
 			bytes[11] = i
@@ -1140,7 +1119,7 @@ func CheckPingSupport(t *TestRunner) {
 			fmt.Sprintf("GOAWAY after invalid PING id (%d)", i))
 	}
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypePing), 0, 4)
 		bytes[11] = 0xFF
@@ -1156,7 +1135,7 @@ func CheckGoAwaySupport(t *TestRunner) {
 		if i == validLength {
 			continue
 		}
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypeGoAway), 0, uint8(validLength))
 			t.SendDataAndExpectGoAway(bytes, 0)
@@ -1166,14 +1145,14 @@ func CheckGoAwaySupport(t *TestRunner) {
 }
 
 func CheckHeadersSupport(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeHeaders), 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
 		"GOAWAY after empty HEADERS")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeHeaders), 0, 4)
 		bytes[11] = 1 // stream id
@@ -1181,7 +1160,7 @@ func CheckHeadersSupport(t *TestRunner) {
 	},
 		"GOAWAY after HEADERS for non open stream")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		syn := new(spdy.SynStreamFrame)
 		syn.StreamId = 1
 		syn.Headers = http.Header{}
@@ -1214,7 +1193,7 @@ func CheckWindowUpdateSupport(t *TestRunner) {
 		if i == validLength {
 			continue
 		}
-		t.RunTest(func(t *SpdyTester) {
+		t.RunTest(func(t *SPDYTester) {
 			bytes := CreateControlFrameBytes(
 				2, uint16(spdy.TypeWindowUpdate), 0, uint8(validLength))
 			t.SendDataAndExpectGoAway(bytes, 0)
@@ -1224,14 +1203,14 @@ func CheckWindowUpdateSupport(t *TestRunner) {
 }
 
 func CheckSettingsSupport(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeSettings), 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	},
 		"GOAWAY after empty SETTINGS")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeSettings), 0, 4)
 		bytes[11] = 0
@@ -1239,7 +1218,7 @@ func CheckSettingsSupport(t *TestRunner) {
 	},
 		"GOAWAY after SETTINGS with no id/values")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeSettings), 0, 8)
 		bytes[11] = 1
@@ -1250,7 +1229,7 @@ func CheckSettingsSupport(t *TestRunner) {
 	},
 		"GOAWAY after SETTINGS with valid id / value")
 
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeSettings), 0, 8)
 		bytes[11] = 1 // a single setting
@@ -1262,7 +1241,7 @@ func CheckSettingsSupport(t *TestRunner) {
 }
 
 func CheckCredentialSupport(t *TestRunner) {
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(
 			2, uint16(spdy.TypeWindowUpdate)+1, 0, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
@@ -1274,7 +1253,7 @@ func CheckCredentialSupport(t *TestRunner) {
 		bytes[11] = 1 // a single setting
 		bytes[12] = 0xFF
 		bytes[15] = 0xff
-		t.RunTest(func(t *SpdyTester) { t.SendDataAndExpectGoAway(bytes) }, 
+		t.RunTest(func(t *SPDYTester) { t.SendDataAndExpectGoAway(bytes) }, 
 			"GOAWAY after SETTINGS with invalid setting flag")
 	*/
 }
@@ -1284,7 +1263,7 @@ func CheckDataSupport(t *TestRunner) {
 	// open and the endpoint has not sent a GOAWAY (Section 2.6.6) frame, it 
 	// MUST send issue a stream error (Section 2.4.2) with the error code 
 	// INVALID_STREAM for the stream-id.
-	t.RunTest(func(t *SpdyTester) {
+	t.RunTest(func(t *SPDYTester) {
 		data := new(spdy.DataFrame)
 		data.StreamId = 1
 		t.framer.WriteFrame(data)
