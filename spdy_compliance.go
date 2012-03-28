@@ -19,8 +19,8 @@
 // % cat config.json
 // {
 //   "Endpoint": "www.google.com:443",
-//   "PostUrl":   "http://www.google.com",
-//   "GetUrl":   "http://www.google.com",
+//   "PostURL":   "http://www.google.com",
+//   "GetURL":   "http://www.google.com",
 //   "MaxStreams": 101,
 //   "DisabledTests": [
 //     "GOAWAY after empty SYN_REPLY"
@@ -31,7 +31,7 @@
 //   http://golang.org/doc/install.html
 //
 // Compile and run with:
-// % 6g spdy_compliance.go && 6l spdy_compliance.6 && ./6.out <config.json>
+// % go run spdy_compliance.go <config.json>
 
 package main
 
@@ -40,6 +40,7 @@ import (
 	"compress/zlib"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -51,14 +52,23 @@ import (
 	"code.google.com/p/go.net/spdy"
 )
 
-// Various ANSI escape sequences
-const (
-	RED    = "[0;31m"
-	GREEN  = "[0;32m"
-	YELLOW = "[0;33m"
-	BOLD   = "[1m"
-	NORMAL = "[0m"
-)
+// TerminalColorEscapes contains strings that, when printed to a terminal, will
+// cause subsequent text to be displayed in the given manner.
+type TerminalColorEscapes struct {
+	Red, Green, Yellow, Bold, Normal string
+}
+
+var ansiTerminal = TerminalColorEscapes{
+	Red: "[0;31m",
+	Green: "[0;32m",
+	Yellow: "[0;33m",
+	Bold: "[1m",
+	Normal: "[0m",
+}
+
+// noTerminal contains empty strings for all the escapes and is suitable for
+// writing to a file or other, non-terminal device
+var noTerminal TerminalColorEscapes
 
 // ----------------------------------------------------------------------
 
@@ -66,45 +76,56 @@ const (
 // test.
 type TestConfig struct {
 	Endpoint      string
-	GetUrl        *url.URL
-	PostUrl       *url.URL
-	PushUrl       *url.URL // URL that will result in resources being pushed
+	GetURL        *url.URL
+	PostURL       *url.URL
+	PushURL       *url.URL // URL that will result in resources being pushed
 	DisabledTests []string
 	MaxStreams    int // TODO(rch): detect this from SETTINGS frame
 }
 
-// Loads the configuration data from a file.
-func (t *TestConfig) Load(filename string) {
-	var i interface{}
-	data, err := ioutil.ReadFile(filename)
+// NewTestConfig creates a TestConfig by parsing JSON from the given file.
+func NewTestConfig(configFileName string) (*TestConfig, error) {
+	configBytes, err := ioutil.ReadFile(configFileName)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	err = json.Unmarshal(data, &i)
-	if err != nil {
-		panic(err)
+
+	var testConfigJSON struct {
+		Endpoint                 string
+		GetURL, PostURL, PushURL string
+		DisabledTests            []string
+		MaxStreams               int
 	}
-	m := i.(map[string]interface{})
-	t.Endpoint = m["Endpoint"].(string)
-	t.MaxStreams = int(m["MaxStreams"].(float64))
-	t.GetUrl = t.ParseAsUrl(m["GetUrl"])
-	t.PostUrl = t.ParseAsUrl(m["PostUrl"])
-	t.PushUrl = t.ParseAsUrl(m["PushUrl"])
-	disabled := m["DisabledTests"].([]interface{})
-	for _, s := range disabled {
-		t.DisabledTests = append(t.DisabledTests, s.(string))
+
+	if err := json.Unmarshal(configBytes, &testConfigJSON); err != nil {
+		return nil, err
 	}
+
+	t := &TestConfig{
+		Endpoint:      testConfigJSON.Endpoint,
+		MaxStreams:    testConfigJSON.MaxStreams,
+		DisabledTests: testConfigJSON.DisabledTests,
+	}
+
+	if t.GetURL, err = ParseURL(testConfigJSON.GetURL); err != nil {
+		return nil, errors.New("failed to parse GetURL from config: " + err.Error())
+	}
+	if t.PostURL, err = ParseURL(testConfigJSON.PostURL); err != nil {
+		return nil, errors.New("failed to parse PostURL from config: " + err.Error())
+	}
+	if t.PushURL, err = ParseURL(testConfigJSON.PushURL); err != nil {
+		return nil, errors.New("failed to parse PushURL from config: " + err.Error())
+	}
+
+	return t, nil
 }
 
-func (t *TestConfig) ParseAsUrl(u interface{}) *url.URL {
-	if u == nil {
-		return nil
+// ParseURL returns nil if s is empty and url.Parse otherwise.
+func ParseURL(s string) (*url.URL, error) {
+	if len(s) == 0 {
+		return nil, nil
 	}
-	url, err := url.Parse(u.(string))
-	if err != nil {
-		panic(err)
-	}
-	return url
+	return url.Parse(s)
 }
 
 // ----------------------------------------------------------------------
@@ -113,41 +134,45 @@ func (t *TestConfig) ParseAsUrl(u interface{}) *url.URL {
 // If a test panics, the TestRunner will recover, and mark the test
 // as failed.
 type TestRunner struct {
-	config           TestConfig    // test configuration
-	numTests         int           // total number of tests run
-	numDisabledTests int           // total number of disabled tests
-	failedTests      []string      // list of test descriptions that failed
-	useColor         bool          // if true, then ansi color will be used in the output
+	config           *TestConfig // test configuration
+	numTests         int         // total number of tests run
+	numDisabledTests int         // total number of disabled tests
+	failedTests      []string    // list of test descriptions that failed
+	color            *TerminalColorEscapes
 	args             []string      // list of command line arguments used to restrict the actual set of tests to be run
-	elapsedTime      time.Duration // Total number of nanoseconds spent executing tests
+	elapsedTime      time.Duration // Total time spent executing tests
 }
 
-func NewTestRunner(useColor bool, config string, args []string) *TestRunner {
-	t := new(TestRunner)
-	t.useColor = useColor
-	t.args = args
-	t.config.Load(config)
-	//fmt.Printf("%s\n", t.config)
-	return t
-}
-
-// Logs a formatted descriptive message with the status text displayed
-// in the specified color, followed by the description.
-func (t *TestRunner) Log(color, status, description string) {
-	if t.useColor {
-		fmt.Printf("%s[%s]%s %s\n", color, status, NORMAL, description)
-	} else {
-		fmt.Printf("[%s] %s\n", status, description)
+func NewTestRunner(useColor bool, configFileName string, args []string) (*TestRunner, error) {
+	config, err := NewTestConfig(configFileName)
+	if err != nil {
+		return nil, err
 	}
+
+	t := &TestRunner{
+		args:   args,
+		color:  &noTerminal,
+		config: config,
+	}
+	if useColor {
+		t.color = &ansiTerminal
+	}
+	return t, nil
 }
 
-// Runs the specified test, and records the results.  The test will be
+// Log prints formatted descriptive message with the status text displayed in
+// the specified color, followed by the description.
+func (t *TestRunner) Log(color, status, description string) {
+	fmt.Printf("%s[%s]%s %s\n", color, status, t.color.Normal, description)
+}
+
+// RunTest runs the specified test, and records the results. The test will be
 // marked as failed if it panics.
 func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
+	// If any arguments were given, then this test must have been listed.
 	if len(t.args) > 0 {
 		match := false
 		for _, arg := range t.args {
-			// fmt.Printf("checking: %s\n", arg)
 			if description == arg {
 				match = true
 				break
@@ -158,67 +183,57 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 		}
 	}
 	for _, disabled := range t.config.DisabledTests {
-		//fmt.Printf("%s ?= %s\n", disabled, description)
 		if disabled == description {
-			//fmt.Printf("disabled == description\n")
-			t.DisabledTest(test, description)
+			t.RecordDisabledTest(description)
 			return
 		}
 	}
 
-	t.Log(GREEN, " RUN      ", description)
+	t.Log(t.color.Green, " RUN      ", description)
 	start := time.Now()
 	defer t.Finished(description, start)
-	tester := NewSpdyTester(&t.config)
+	tester := NewSpdyTester(t.config)
 	defer tester.Close()
 	test(tester)
 }
 
-// Marks the test as disabled, and does not run it.
-func (t *TestRunner) DisabledTest(f func(t *SpdyTester), description string) {
+// RecordDisabledTest marks a test as disabled.
+func (t *TestRunner) RecordDisabledTest(description string) {
 	t.numDisabledTests++
-	t.Log(YELLOW, " DISABLED ", description)
+	t.Log(t.color.Yellow, " DISABLED ", description)
 }
 
-// Handles the completion of a test by calling recover and looking for
+// Finished handles the completion of a test by calling recover and looking for
 // a panic.
 func (t *TestRunner) Finished(description string, start time.Time) {
 	end := time.Now()
-	delta := end.Sub(start)
-	t.elapsedTime += delta
+	duration := end.Sub(start)
+	t.elapsedTime += duration
 	t.numTests++
-	err := recover()
 
-	text := fmt.Sprintf("%s (%d ms)", description, delta/1000000)
-	if err != nil {
-		if t.useColor {
-			fmt.Printf("%sERROR%s: %s\n", BOLD, NORMAL, err)
-		} else {
-			fmt.Printf("ERROR: %s\n", err)
-		}
-		t.Log(RED, "  FAILED  ", text)
+	text := fmt.Sprintf("%s (%d ms)", description, int(1000*duration.Seconds()))
+	if err := recover(); err != nil {
+		fmt.Printf("%sERROR%s: %s\n", t.color.Bold, t.color.Normal, err)
+		t.Log(t.color.Red, "  FAILED  ", text)
 		t.failedTests = append(t.failedTests, description)
 	} else {
-		t.Log(GREEN, "       OK ", text)
+		t.Log(t.color.Green, "       OK ", text)
 	}
 }
 
-// Prints a textual summary of all the test run.
+// Summarize prints a textual summary of all the test run.
 func (t *TestRunner) Summarize() bool {
-	t.Log(GREEN, "==========",
-		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, int(1000*t.elapsedTime.Seconds())))
+	t.Log(t.color.Green, "==========", fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, int(1000*t.elapsedTime.Seconds())))
 
-	t.Log(GREEN, "  PASSED  ",
-		fmt.Sprintf("%d tests.", t.numTests-len(t.failedTests)))
+	t.Log(t.color.Green, "  PASSED  ", fmt.Sprintf("%d tests.", t.numTests-len(t.failedTests)))
 
-	t.Log(YELLOW, " DISABLED ", fmt.Sprintf("%d tests", t.numDisabledTests))
+	t.Log(t.color.Yellow, " DISABLED ", fmt.Sprintf("%d tests", t.numDisabledTests))
 
 	if len(t.failedTests) != 0 {
-		t.Log(RED, "  FAILED  ",
-			fmt.Sprintf("%d tests, listed below:", len(t.failedTests)))
+		t.Log(t.color.Red, "  FAILED  ", fmt.Sprintf("%d tests, listed below:", len(t.failedTests)))
 
 		for _, test := range t.failedTests {
-			t.Log(RED, "  FAILED  ", test)
+			t.Log(t.color.Red, "  FAILED  ", test)
 		}
 		return false
 	}
@@ -298,9 +313,9 @@ func (t *SpdyTester) CreateSynStreamFrameBytes(streamId int) []byte {
 	frame.Headers = http.Header{
 		"method":  []string{"GET"},
 		"version": []string{"HTTP/1.1"},
-		"url":     []string{t.config.GetUrl.String()},
-		"host":    []string{t.config.GetUrl.Host},
-		"scheme":  []string{t.config.GetUrl.Scheme}}
+		"url":     []string{t.config.GetURL.String()},
+		"host":    []string{t.config.GetURL.Host},
+		"scheme":  []string{t.config.GetURL.Scheme}}
 
 	buf := new(bytes.Buffer)
 	framer, err := spdy.NewFramer(buf, buf)
@@ -661,9 +676,9 @@ func CheckSynStreamSupport(t *TestRunner) {
 		frame.Headers = http.Header{
 			"method":     []string{"GET"},
 			"version":    []string{"HTTP/1.1"},
-			"url":        []string{t.config.GetUrl.String()},
-			"host":       []string{t.config.GetUrl.Host},
-			"scheme":     []string{t.config.GetUrl.Scheme},
+			"url":        []string{t.config.GetURL.String()},
+			"host":       []string{t.config.GetURL.Host},
+			"scheme":     []string{t.config.GetURL.Scheme},
 			"connection": []string{"close"}}
 
 		frame.StreamId = 1
@@ -685,9 +700,9 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":  []string{"POST"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.PostUrl.String()},
-			"host":    []string{t.config.PostUrl.Host},
-			"scheme":  []string{t.config.PostUrl.Scheme}}
+			"url":     []string{t.config.PostURL.String()},
+			"host":    []string{t.config.PostURL.Host},
+			"scheme":  []string{t.config.PostURL.Scheme}}
 		//syn.CFHeader.Flags = spdy.ControlFlagFin
 		t.framer.WriteFrame(syn)
 
@@ -712,9 +727,9 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":         []string{"POST"},
 			"version":        []string{"HTTP/1.1"},
-			"url":            []string{t.config.PostUrl.String()},
-			"host":           []string{t.config.PostUrl.Host},
-			"scheme":         []string{t.config.PostUrl.Scheme},
+			"url":            []string{t.config.PostURL.String()},
+			"host":           []string{t.config.PostURL.Host},
+			"scheme":         []string{t.config.PostURL.Scheme},
 			"content-length": []string{"10"}}
 		//syn.CFHeader.Flags = spdy.ControlFlagFin
 		t.framer.WriteFrame(syn)
@@ -737,8 +752,8 @@ func CheckSynStreamSupport(t *TestRunner) {
 		"Incorrect content-length")
 
 	t.RunTest(func(t *SpdyTester) {
-		if t.config.PushUrl == nil {
-			panic("No PushUrl specified in config")
+		if t.config.PushURL == nil {
+			panic("No PushURL specified in config")
 		}
 		syn := new(spdy.SynStreamFrame)
 		syn.StreamId = 1
@@ -746,9 +761,9 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":  []string{"GET"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.PushUrl.String()},
-			"host":    []string{t.config.PushUrl.Host},
-			"scheme":  []string{t.config.PushUrl.Scheme}}
+			"url":     []string{t.config.PushURL.String()},
+			"host":    []string{t.config.PushURL.Host},
+			"scheme":  []string{t.config.PushURL.Scheme}}
 
 		t.framer.WriteFrame(syn)
 		t.ExpectPushReply(1)
@@ -838,9 +853,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		t.SendDataAndExpectValidReply(bytes)
 	}, "Send SYN_STREAM with valid NV block")
@@ -849,9 +864,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"Method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with uppercase header")
@@ -860,9 +875,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 			"", "bar",
 		))
 		t.SendDataAndExpectGoAway(bytes, 0)
@@ -872,9 +887,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 			"foo", "",
 		))
 		t.SendDataAndExpectValidReply(bytes)
@@ -884,9 +899,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		bytes = append(bytes, 0)
 		t.SendDataAndExpectGoAway(bytes, 0)
@@ -897,9 +912,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 			"method", "GET",
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with duplicate header")
@@ -908,9 +923,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with too large NV count")
@@ -919,9 +934,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(4,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		))
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with too small NV count")
@@ -930,9 +945,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		block := buildNameValueBlock(0,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		)
 		// Alter the number of headers to be huge
 		block[0] = 0x7f
@@ -944,9 +959,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		block := buildNameValueBlock(0,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		)
 		// Alter the number of headers to be possibly negative. This
 		// might get by a sanity check in a buggy server.
@@ -959,9 +974,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		block := buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		)
 		// Alter the first key length to be huge
 		block[4] = 0x7f
@@ -973,9 +988,9 @@ func CheckNameValueBlocks(t *TestRunner) {
 		block := buildNameValueBlock(5,
 			"method", "GET",
 			"version", "HTTP/1.1",
-			"url", t.config.GetUrl.String(),
-			"host", t.config.GetUrl.Host,
-			"scheme", t.config.GetUrl.Scheme,
+			"url", t.config.GetURL.String(),
+			"host", t.config.GetURL.Host,
+			"scheme", t.config.GetURL.Scheme,
 		)
 		// Alter the first key length to be possibly negative
 		block[4] = 0x81
@@ -1019,9 +1034,9 @@ func CheckConcurrentStreamSupport(t *SpdyTester) {
 			http.Header{
 				"method":  []string{"POST"},
 				"version": []string{"HTTP/1.1"},
-				"url":     []string{t.config.GetUrl.String()},
-				"host":    []string{t.config.GetUrl.Host},
-				"scheme":  []string{t.config.GetUrl.Scheme}}
+				"url":     []string{t.config.GetURL.String()},
+				"host":    []string{t.config.GetURL.Host},
+				"scheme":  []string{t.config.GetURL.Scheme}}
 
 		frame := new(spdy.SynStreamFrame)
 		frame.StreamId = uint32(2*i + 1)
@@ -1176,9 +1191,9 @@ func CheckHeadersSupport(t *TestRunner) {
 		headers.Headers = http.Header{
 			"method":  []string{"GET"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.GetUrl.String()},
-			"host":    []string{t.config.GetUrl.Host},
-			"scheme":  []string{t.config.GetUrl.Scheme}}
+			"url":     []string{t.config.GetURL.String()},
+			"host":    []string{t.config.GetURL.Host},
+			"scheme":  []string{t.config.GetURL.Scheme}}
 
 		t.framer.WriteFrame(syn)
 		t.framer.WriteFrame(headers)
@@ -1303,7 +1318,10 @@ func main() {
 	}
 	// TODO(rch): figure out how to detect a tty, and conditionally enable color
 	useColor := true
-	t := NewTestRunner(useColor, os.Args[1], os.Args[2:])
+	t, err := NewTestRunner(useColor, os.Args[1], os.Args[2:])
+	if err != nil {
+		panic("Error: " + err.Error())
+	}
 
 	CheckNextProtocolNegotiationSupport(t)
 	CheckInvalidControlFrameDetection(t)
