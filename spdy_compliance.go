@@ -21,7 +21,7 @@
 //   "Endpoint": "www.google.com:443",
 //   "PostUrl":   "http://www.google.com",
 //   "GetUrl":   "http://www.google.com",
-//   "MaxStreams": 101
+//   "MaxStreams": 101,
 //   "DisabledTests": [
 //     "GOAWAY after empty SYN_REPLY"
 //   ]
@@ -39,14 +39,16 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
-	"http"
-	"http/spdy"
+	"io"
 	"io/ioutil"
-	"json"
+	"net/http"
+	"net/url"
 	"os"
 	"time"
-	"url"
+
+	"code.google.com/p/go.net/spdy"
 )
 
 // Various ANSI escape sequences
@@ -111,13 +113,13 @@ func (t *TestConfig) ParseAsUrl(u interface{}) *url.URL {
 // If a test panics, the TestRunner will recover, and mark the test
 // as failed.
 type TestRunner struct {
-	config           TestConfig // test configuration
-	numTests         int        // total number of tests run
-	numDisabledTests int        // total number of disabled tests
-	failedTests      []string   // list of test descriptions that failed
-	useColor         bool       // if true, then ansi color will be used in the output
-	args             []string   // list of command line arguments used to restrict the actual set of tests to be run
-	elapsedTime      int64      // Total number of nanoseconds spent executing tests
+	config           TestConfig    // test configuration
+	numTests         int           // total number of tests run
+	numDisabledTests int           // total number of disabled tests
+	failedTests      []string      // list of test descriptions that failed
+	useColor         bool          // if true, then ansi color will be used in the output
+	args             []string      // list of command line arguments used to restrict the actual set of tests to be run
+	elapsedTime      time.Duration // Total number of nanoseconds spent executing tests
 }
 
 func NewTestRunner(useColor bool, config string, args []string) *TestRunner {
@@ -165,7 +167,7 @@ func (t *TestRunner) RunTest(test func(*SpdyTester), description string) {
 	}
 
 	t.Log(GREEN, " RUN      ", description)
-	start := time.Nanoseconds()
+	start := time.Now()
 	defer t.Finished(description, start)
 	tester := NewSpdyTester(&t.config)
 	defer tester.Close()
@@ -180,9 +182,9 @@ func (t *TestRunner) DisabledTest(f func(t *SpdyTester), description string) {
 
 // Handles the completion of a test by calling recover and looking for
 // a panic.
-func (t *TestRunner) Finished(description string, start int64) {
-	end := time.Nanoseconds()
-	delta := end - start
+func (t *TestRunner) Finished(description string, start time.Time) {
+	end := time.Now()
+	delta := end.Sub(start)
 	t.elapsedTime += delta
 	t.numTests++
 	err := recover()
@@ -204,7 +206,7 @@ func (t *TestRunner) Finished(description string, start int64) {
 // Prints a textual summary of all the test run.
 func (t *TestRunner) Summarize() bool {
 	t.Log(GREEN, "==========",
-		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, t.elapsedTime/1000000))
+		fmt.Sprintf("%d tests ran. (%d ms total)", t.numTests, int(1000*t.elapsedTime.Seconds())))
 
 	t.Log(GREEN, "  PASSED  ",
 		fmt.Sprintf("%d tests.", t.numTests-len(t.failedTests)))
@@ -268,7 +270,7 @@ func (t *SpdyTester) init(nextProtos []string) {
 	// to be returned when attempting to read a frame, and allows us
 	// to detect when the server has failed to reply (quickly enough)
 	// to one of our requests
-	conn.SetReadTimeout(1000000000)
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	t.conn = conn
 	t.framer, err = spdy.NewFramer(conn, conn)
 	if err != nil {
@@ -296,7 +298,7 @@ func (t *SpdyTester) CreateSynStreamFrameBytes(streamId int) []byte {
 	frame.Headers = http.Header{
 		"method":  []string{"GET"},
 		"version": []string{"HTTP/1.1"},
-		"url":     []string{t.config.GetUrl.Raw},
+		"url":     []string{t.config.GetUrl.String()},
 		"host":    []string{t.config.GetUrl.Host},
 		"scheme":  []string{t.config.GetUrl.Scheme}}
 
@@ -312,7 +314,7 @@ func (t *SpdyTester) CreateSynStreamFrameBytes(streamId int) []byte {
 }
 
 // Returns the next frame read from the framer that is not a SETTINGS frame.
-func (t *SpdyTester) ReadNextNonSettingsFrame() (spdy.Frame, os.Error) {
+func (t *SpdyTester) ReadNextNonSettingsFrame() (spdy.Frame, error) {
 	for true {
 		//		fmt.Printf("Reading frame...\n")
 		frame, err := t.framer.ReadFrame()
@@ -354,7 +356,7 @@ func (t *SpdyTester) ExpectEOF() {
 	if frame != nil {
 		panic(fmt.Sprintf("Unexpected frame after %s", frame))
 	}
-	if err != os.EOF {
+	if err != io.EOF {
 		panic(fmt.Sprintf("Unexpected error: %s", err))
 	}
 }
@@ -487,7 +489,7 @@ func (t *SpdyTester) ExpectPushReply(streamId int) {
 				dataReceived = true
 			} else {
 				if data.Flags == spdy.DataFlagFin {
-					pushedIds[data.StreamId] = false, false //remove from map
+					delete(pushedIds, data.StreamId) //remove from map
 				}
 			}
 			//fmt.Printf("map: %s %d\n", pushedIds, len(pushedIds))
@@ -659,7 +661,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		frame.Headers = http.Header{
 			"method":     []string{"GET"},
 			"version":    []string{"HTTP/1.1"},
-			"url":        []string{t.config.GetUrl.Raw},
+			"url":        []string{t.config.GetUrl.String()},
 			"host":       []string{t.config.GetUrl.Host},
 			"scheme":     []string{t.config.GetUrl.Scheme},
 			"connection": []string{"close"}}
@@ -683,7 +685,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":  []string{"POST"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.PostUrl.Raw},
+			"url":     []string{t.config.PostUrl.String()},
 			"host":    []string{t.config.PostUrl.Host},
 			"scheme":  []string{t.config.PostUrl.Scheme}}
 		//syn.CFHeader.Flags = spdy.ControlFlagFin
@@ -710,7 +712,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":         []string{"POST"},
 			"version":        []string{"HTTP/1.1"},
-			"url":            []string{t.config.PostUrl.Raw},
+			"url":            []string{t.config.PostUrl.String()},
 			"host":           []string{t.config.PostUrl.Host},
 			"scheme":         []string{t.config.PostUrl.Scheme},
 			"content-length": []string{"10"}}
@@ -744,7 +746,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		syn.Headers = http.Header{
 			"method":  []string{"GET"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.PushUrl.Raw},
+			"url":     []string{t.config.PushUrl.String()},
 			"host":    []string{t.config.PushUrl.Host},
 			"scheme":  []string{t.config.PushUrl.Scheme}}
 
@@ -806,7 +808,7 @@ var synStreamHeader = []byte{
 // returns a SYN_STREAM frame using it.
 func buildSynStreamWithNameValueData(nameValueData []byte) []byte {
 	compressBuf := new(bytes.Buffer)
-	compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
+	compressor, _ := zlib.NewWriterLevelDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
 	compressor.Write(nameValueData)
 	compressor.Flush()
 
@@ -983,8 +985,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 
 	t.RunTest(func(t *SpdyTester) {
 		compressBuf := new(bytes.Buffer)
-		compressor, _ := zlib.NewWriterDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
-		//compressor, _ := zlib.NewWriterDict(compressBuf, []byte(spdy.HeaderDictionary))
+		compressor, _ := zlib.NewWriterLevelDict(compressBuf, zlib.BestCompression, []byte(spdy.HeaderDictionary))
 		// 1 MB of NULs
 		nuls := make([]byte, 1024)
 		for i := 0; i < 1024; i++ {
@@ -1018,7 +1019,7 @@ func CheckConcurrentStreamSupport(t *SpdyTester) {
 			http.Header{
 				"method":  []string{"POST"},
 				"version": []string{"HTTP/1.1"},
-				"url":     []string{t.config.GetUrl.Raw},
+				"url":     []string{t.config.GetUrl.String()},
 				"host":    []string{t.config.GetUrl.Host},
 				"scheme":  []string{t.config.GetUrl.Scheme}}
 
@@ -1175,7 +1176,7 @@ func CheckHeadersSupport(t *TestRunner) {
 		headers.Headers = http.Header{
 			"method":  []string{"GET"},
 			"version": []string{"HTTP/1.1"},
-			"url":     []string{t.config.GetUrl.Raw},
+			"url":     []string{t.config.GetUrl.String()},
 			"host":    []string{t.config.GetUrl.Host},
 			"scheme":  []string{t.config.GetUrl.Scheme}}
 
