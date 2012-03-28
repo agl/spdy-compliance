@@ -242,7 +242,7 @@ func (t *TestRunner) Summarize() bool {
 
 // ----------------------------------------------------------------------
 
-// Utility function for creating a sequence of bytes that represents 
+// Utility function for creating a sequence of bytes that represents
 // a (probably invalid) SPDY control frame.
 func CreateControlFrameBytes(version uint8, frameType uint16, flags uint8, length uint8) []byte {
 	bytes := make([]byte, 8+length)
@@ -545,7 +545,7 @@ func CheckNextProtocolNegotiationSupport(t *TestRunner) {
 	}
 }
 
-// Send a variety of invalid control frames and verify that 
+// Send a variety of invalid control frames and verify that
 // the server sends a GOAWAY.
 func CheckInvalidControlFrameDetection(t *TestRunner) {
 	t.RunTest(
@@ -562,11 +562,11 @@ func CheckInvalidControlFrameDetection(t *TestRunner) {
 	// Invalid version
 	// TODO(rch): what is correct behavior.  Draft 2 says:
 	// SPDY does lazy version checking on receipt of any control frame, and
-	// does version enforcement only on SYN_STREAM frames.  If an endpoint 
+	// does version enforcement only on SYN_STREAM frames.  If an endpoint
 	// receives a SYN_STREAM frame with an unsupported version, the endpoint
 	// must return a RST_STREAM frame with the status code UNSUPPORTED_VERSION.
 	// For any other type of control frame, the frame must be ignored.
-	// 
+	//
 	// Draft 3 is silent on the subject.
 	t.RunTest(func(t *SPDYTester) {
 		bytes := CreateControlFrameBytes(3, uint16(spdy.TypeNoop), 0, 0)
@@ -1253,15 +1253,15 @@ func CheckCredentialSupport(t *TestRunner) {
 		bytes[11] = 1 // a single setting
 		bytes[12] = 0xFF
 		bytes[15] = 0xff
-		t.RunTest(func(t *SPDYTester) { t.SendDataAndExpectGoAway(bytes) }, 
+		t.RunTest(func(t *SPDYTester) { t.SendDataAndExpectGoAway(bytes) },
 			"GOAWAY after SETTINGS with invalid setting flag")
 	*/
 }
 
 func CheckDataSupport(t *TestRunner) {
 	// 2.2.2: If an endpoint receives a data frame for a stream-id which is not
-	// open and the endpoint has not sent a GOAWAY (Section 2.6.6) frame, it 
-	// MUST send issue a stream error (Section 2.4.2) with the error code 
+	// open and the endpoint has not sent a GOAWAY (Section 2.6.6) frame, it
+	// MUST send issue a stream error (Section 2.4.2) with the error code
 	// INVALID_STREAM for the stream-id.
 	t.RunTest(func(t *SPDYTester) {
 		data := new(spdy.DataFrame)
@@ -1276,13 +1276,13 @@ func CheckDataSupport(t *TestRunner) {
 	// and the recipient MUST issue a stream error (Section 2.4.2) with
 	// the status code PROTOCOL_ERROR for the stream-id.
 
-	// 2.2.2: All SPDY endpoints MUST accept compressed data frames. 
+	// 2.2.2: All SPDY endpoints MUST accept compressed data frames.
 	// Compression of data frames is always done using zlib compression. Each
 	// stream initializes and uses its own compression context dedicated to use
 	// within that stream. Endpoints are encouraged to use application
 	// level compression rather than SPDY stream level compression.
 
-	// 2.2.2 Each SPDY stream sending compressed frames creates its own zlib 
+	// 2.2.2 Each SPDY stream sending compressed frames creates its own zlib
 	// context for that stream. (Thus, if both endpoints of a stream are
 	// compressing data on the stream, there will be two zlib contexts, one
 	// for sending and one for receiving).
