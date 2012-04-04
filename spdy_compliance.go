@@ -21,7 +21,6 @@
 //   "Endpoint": "www.google.com:443",
 //   "PostURL":   "http://www.google.com",
 //   "GetURL":   "http://www.google.com",
-//   "MaxStreams": 101,
 //   "DisabledTests": [
 //     "GOAWAY after empty SYN_REPLY"
 //   ]
@@ -80,7 +79,7 @@ type TestConfig struct {
 	PostURL       *url.URL
 	PushURL       *url.URL // URL that will result in resources being pushed
 	DisabledTests []string
-	MaxStreams    int // TODO(rch): detect this from SETTINGS frame
+	MaxStreams    int
 }
 
 // NewTestConfig creates a TestConfig by parsing JSON from the given file.
@@ -164,6 +163,44 @@ func NewTestRunner(useColor bool, configFileName string, args []string) (*TestRu
 // the specified color, followed by the description.
 func (t *TestRunner) Log(color, status, description string) {
 	fmt.Printf("%s[%s]%s %s\n", color, status, t.color.Normal, description)
+}
+
+// FetchSettings connects to the server and reads a SETTINGS frame, if needed.
+func (t *TestRunner) FetchSettings() error {
+	if t.config.MaxStreams != 0 {
+		return nil
+	}
+
+	tester := NewSPDYTester(t.config)
+	defer tester.Close()
+
+	frame, err := tester.framer.ReadFrame()
+	if err != nil {
+		return err
+	}
+	settings, ok := frame.(*spdy.SettingsFrame)
+	if !ok {
+		return fmt.Errorf("expected SETTINGS, got %#v", frame)
+	}
+
+	for _, setting := range settings.FlagIdValues {
+		if setting.Id == spdy.SettingsMaxConcurrentStreams {
+			maxStreams := int(setting.Value)
+			switch {
+			case maxStreams < 0:
+				panic("SettingsMaxConcurrentStreams so large that it overflowed")
+			case maxStreams == 0:
+				panic("SettingsMaxConcurrentStreams is zero")
+			}
+			t.config.MaxStreams = maxStreams
+		}
+	}
+
+	if t.config.MaxStreams == 0 {
+		return fmt.Errorf("no SettingsMaxConcurrentStreams in SETTINGS")
+	}
+
+	return nil
 }
 
 // RunTest runs the specified test, and records the results. The test will be
@@ -1300,6 +1337,9 @@ func main() {
 	t, err := NewTestRunner(useColor, os.Args[1], os.Args[2:])
 	if err != nil {
 		panic("Error: " + err.Error())
+	}
+	if err := t.FetchSettings(); err != nil {
+		panic("Failed to fetch SETTINGS frame: " + err.Error())
 	}
 
 	CheckNextProtocolNegotiationSupport(t)
