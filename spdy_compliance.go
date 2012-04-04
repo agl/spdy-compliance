@@ -140,6 +140,7 @@ type TestRunner struct {
 	color            *TerminalColorEscapes
 	args             []string      // list of command line arguments used to restrict the actual set of tests to be run
 	elapsedTime      time.Duration // Total time spent executing tests
+	readTimeout      time.Duration // Read timeout for a single test
 }
 
 func NewTestRunner(useColor bool, configFileName string, args []string) (*TestRunner, error) {
@@ -335,6 +336,10 @@ func (t *SPDYTester) Dial(nextProtos []string) {
 	if t.framer, err = spdy.NewFramer(conn, conn); err != nil {
 		panic(err)
 	}
+}
+
+func (t *SPDYTester) SetReadTimeout(timeout time.Duration) {
+	t.conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func (t *SPDYTester) Close() {
@@ -1058,14 +1063,18 @@ func CheckNameValueBlocks(t *TestRunner) {
 
 func CheckConcurrentStreamSupport(t *SPDYTester) {
 	// Open up lots of streams and see what happens! :>
-	buf := new(bytes.Buffer)
-	framer, err := spdy.NewFramer(buf, buf)
+	// This test takes maxStreams+1 RTTs to the server so we increase the
+	// read timeout.
+	t.SetReadTimeout(10 * time.Second)
+
+	var buf bytes.Buffer
+	framer, err := spdy.NewFramer(&buf, &buf)
 	if err != nil {
-		fmt.Printf("ERROR: %s", err)
+		panic(err)
 	}
 
-	var allBytes []byte
 	maxStreams := t.config.MaxStreams
+	var allBytes []byte
 	for i := 0; i < maxStreams+1; i++ {
 		headers :=
 			http.Header{
@@ -1079,14 +1088,11 @@ func CheckConcurrentStreamSupport(t *SPDYTester) {
 		frame.StreamId = uint32(2*i + 1)
 		frame.Headers = headers
 		framer.WriteFrame(frame)
-		//fmt.Printf("id: %d\n", frame.StreamId)
 		frameBytes := buf.Bytes()
 		buf.Reset()
-		//fmt.Printf("buf.Len(): %d\n", buf.Len())
 
-		frameBytes[4] = 0x00 // fin
+		frameBytes[4] = 0x00 // clear FLAG_FIN
 		allBytes = append(allBytes, frameBytes...)
-		//fmt.Printf("len(bytes): %d\n", len(allBytes))
 	}
 
 	t.conn.Write(allBytes)
