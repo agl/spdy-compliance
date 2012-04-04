@@ -323,7 +323,10 @@ func NewSPDYTester(config *TestConfig) *SPDYTester {
 // Dial creates a TLS connection to the configured end-point and negotiates
 // with the given Next Protocol Negotiation strings.
 func (t *SPDYTester) Dial(nextProtos []string) {
-	conn, err := tls.Dial("tcp", t.config.Endpoint, &tls.Config{NextProtos: nextProtos})
+	conn, err := tls.Dial("tcp", t.config.Endpoint, &tls.Config{
+		NextProtos:         nextProtos,
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
 		panic(fmt.Sprintf("failed to make TLS connection to %s: %s", t.config.Endpoint, err))
 	}
