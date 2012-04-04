@@ -296,15 +296,24 @@ func CreateControlFrameBytes(version uint8, frameType uint16, flags uint8, lengt
 
 // ----------------------------------------------------------------------
 
+type spdyVersion int
+
+const (
+	SPDY2 spdyVersion = 2
+	SPDY3 spdyVersion = 3
+)
+
 type SPDYTester struct {
-	conn   *tls.Conn
-	framer *spdy.Framer
-	config *TestConfig
+	conn    *tls.Conn
+	framer  *spdy.Framer
+	config  *TestConfig
+	version spdyVersion
 }
 
 func NewSPDYTester(config *TestConfig) *SPDYTester {
 	tester := &SPDYTester{
-		config: config,
+		config:  config,
+		version: SPDY2,
 	}
 	tester.Dial([]string{"spdy/2"})
 	return tester
@@ -789,27 +798,38 @@ func CheckSynStreamSupport(t *TestRunner) {
 // buildNameValueBlock returns an encoded (but not compressed) Name/Value block
 // consisting of the given strings. The number of values is given explicitly so
 // that it can be incorrect.
-func buildNameValueBlock(numValues int, values ...string) []byte {
-	length := 4 /* num values */
+func buildNameValueBlock(spdyVersion spdyVersion, numValues int, values ...string) []byte {
+	sizeSize := 2
+	if spdyVersion == SPDY3 {
+		sizeSize = 4
+	}
+
+	length := sizeSize /* num values */
 	for _, v := range values {
-		length += 4 + len(v)
+		length += sizeSize + len(v)
 	}
 
 	ret := make([]byte, length)
 	x := ret
 
-	x[0] = byte(numValues >> 24)
-	x[1] = byte(numValues >> 16)
-	x[2] = byte(numValues >> 8)
-	x[3] = byte(numValues)
-	x = x[4:]
+	if spdyVersion == SPDY3 {
+		x[0] = byte(numValues >> 24)
+		x[1] = byte(numValues >> 16)
+		x = x[2:]
+	}
+	x[0] = byte(numValues >> 8)
+	x[1] = byte(numValues)
+	x = x[2:]
 
 	for _, v := range values {
-		x[0] = byte(len(v) >> 24)
-		x[1] = byte(len(v) >> 16)
-		x[2] = byte(len(v) >> 8)
-		x[3] = byte(len(v))
-		x = x[4:]
+		if spdyVersion == SPDY3 {
+			x[0] = byte(len(v) >> 24)
+			x[1] = byte(len(v) >> 16)
+			x = x[2:]
+		}
+		x[0] = byte(len(v) >> 8)
+		x[1] = byte(len(v))
+		x = x[2:]
 
 		copy(x, []byte(v))
 		x = x[len(v):]
@@ -866,7 +886,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with bad zlib data")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 5,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -877,7 +897,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with valid NV block")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 5,
 			"Method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -888,7 +908,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with uppercase header")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 6,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -900,7 +920,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with empty name")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 6,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -912,19 +932,20 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with empty value")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(5,
+		nvBlock := buildNameValueBlock(t.version, 5,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
 			"host", t.config.GetURL.Host,
 			"scheme", t.config.GetURL.Scheme,
-		))
-		bytes = append(bytes, 0)
+		)
+		nvBlock = append(nvBlock, 0)
+		bytes := buildSynStreamWithNameValueData(nvBlock)
 		t.SendDataAndExpectGoAway(bytes, 0)
 	}, "Send SYN_STREAM with garbage after NV block")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 6,
 			"method", "GET",
 			"method", "GET",
 			"version", "HTTP/1.1",
@@ -936,7 +957,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with duplicate header")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(6,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 6,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -947,7 +968,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with too large NV count")
 
 	t.RunTest(func(t *SPDYTester) {
-		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(4,
+		bytes := buildSynStreamWithNameValueData(buildNameValueBlock(t.version, 4,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -958,7 +979,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with too small NV count")
 
 	t.RunTest(func(t *SPDYTester) {
-		block := buildNameValueBlock(0,
+		block := buildNameValueBlock(t.version, 0,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -972,7 +993,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with huge NV count")
 
 	t.RunTest(func(t *SPDYTester) {
-		block := buildNameValueBlock(0,
+		block := buildNameValueBlock(t.version, 0,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -987,7 +1008,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with possibly negative NV count")
 
 	t.RunTest(func(t *SPDYTester) {
-		block := buildNameValueBlock(5,
+		block := buildNameValueBlock(t.version, 5,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
@@ -1001,7 +1022,7 @@ func CheckNameValueBlocks(t *TestRunner) {
 	}, "Send SYN_STREAM with huge NV key length")
 
 	t.RunTest(func(t *SPDYTester) {
-		block := buildNameValueBlock(5,
+		block := buildNameValueBlock(t.version, 5,
 			"method", "GET",
 			"version", "HTTP/1.1",
 			"url", t.config.GetURL.String(),
