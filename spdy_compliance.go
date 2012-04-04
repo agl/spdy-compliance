@@ -46,6 +46,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"code.google.com/p/go.net/spdy"
@@ -464,7 +465,7 @@ func (t *SPDYTester) ExpectRstStream(id uint32, status spdy.StatusCode) {
 // ExpectReply checks that a SYN_REPLY frame is received as the first
 // non-settings frame followed by optional data frames until receipt of a frame
 // with FIN set.
-func (t *SPDYTester) ExpectReply(id uint32) {
+func (t *SPDYTester) ExpectReply(id uint32) *spdy.SynReplyFrame {
 	frame, err := t.ReadNextNonSettingsFrame()
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error: %s", err))
@@ -495,6 +496,8 @@ func (t *SPDYTester) ExpectReply(id uint32) {
 			}
 		}
 	}
+
+	return reply
 }
 
 func (t *SPDYTester) ExpectPushReply(streamId int) {
@@ -724,9 +727,6 @@ func CheckSynStreamSupport(t *TestRunner) {
 	},
 		"Connection header ignored")
 
-	// Send a complete request with connection: close,
-	// and read complete reply, then verify that the connection stays open
-	// and we can send an additional request
 	t.RunTest(func(t *SPDYTester) {
 		syn := new(spdy.SynStreamFrame)
 		syn.StreamId = 1
@@ -749,7 +749,7 @@ func CheckSynStreamSupport(t *TestRunner) {
 		data.Data = []byte{1, 2, 3}
 		t.framer.WriteFrame(data)
 
-		t.ExpectGoAway(0)
+		t.ExpectGoAway(1)
 	},
 		"DATA after RST")
 
@@ -764,23 +764,21 @@ func CheckSynStreamSupport(t *TestRunner) {
 			"host":           []string{t.config.PostURL.Host},
 			"scheme":         []string{t.config.PostURL.Scheme},
 			"content-length": []string{"10"}}
-		//syn.CFHeader.Flags = spdy.ControlFlagFin
 		t.framer.WriteFrame(syn)
-
-		rst := new(spdy.RstStreamFrame)
-		rst.StreamId = 1
-		rst.Status = spdy.Cancel
-		t.framer.WriteFrame(rst)
 
 		data := new(spdy.DataFrame)
 		data.StreamId = 1
+		data.Flags = spdy.DataFlagFin
 		data.Data = []byte{1, 2, 3}
 		t.framer.WriteFrame(data)
 
 		// 3.2.1 If a server receives a request where the sum of the data frame
 		// payload lengths does not equal the size of the Content-Length header,
 		// the server MUST return a 400 (Bad Request) error.
-		t.ExpectGoAway(0)
+		reply := t.ExpectReply(1)
+		if status := reply.Headers.Get("status"); !strings.HasPrefix(status, "400") {
+			panic("expected 400 status but got: " + status)
+		}
 	},
 		"Incorrect content-length")
 
